@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocQA — ask your documents</title>
+<style>
+  :root { color-scheme: light dark; --accent:#2563eb; --border:#8884; }
+  * { box-sizing: border-box; }
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 760px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .sub { opacity: .7; margin: 0 0 20px; font-size: .9rem; }
+  section { border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+  h2 { font-size: 1rem; margin: 0 0 10px; }
+  ul { list-style: none; padding: 0; margin: 0 0 10px; }
+  li { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; font-size: .92rem; }
+  li button { padding: 0 8px; }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--border); border-radius: 8px; background: transparent; padding: 8px 14px; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; }
+  input[type=text] { flex: 1; font: inherit; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: inherit; }
+  .answer { white-space: pre-wrap; margin-top: 14px; }
+  .src { font-size: .82rem; opacity: .8; border-left: 3px solid var(--accent); padding-left: 10px; margin-top: 10px; }
+  .badge { display: inline-block; font-size: .75rem; border: 1px solid var(--border); border-radius: 99px; padding: 1px 8px; margin-left: 6px; }
+  .err { color: #dc2626; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>DocQA <span id="mode" class="badge"></span></h1>
+  <p class="sub">Upload PDF, TXT or Markdown files, then ask questions. Answers cite the file and page.</p>
+
+  <section>
+    <h2>Documents</h2>
+    <ul id="docs"></ul>
+    <input type="file" id="file" accept=".pdf,.txt,.md">
+    <div id="uploadErr" class="err"></div>
+  </section>
+
+  <section>
+    <h2>Ask a question</h2>
+    <div class="row">
+      <input type="text" id="q" placeholder="e.g. How often must the safety training be repeated?">
+      <button class="primary" id="ask">Ask</button>
+    </div>
+    <div id="out"></div>
+  </section>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function headers() {
+  let code = null;
+  try { code = sessionStorage.getItem('code'); } catch {}
+  return code ? { 'X-Access-Code': code } : {};
+}
+
+async function api(url, opts = {}) {
+  opts.headers = { ...(opts.headers || {}), ...headers() };
+  let r = await fetch(url, opts);
+  if (r.status === 401) {
+    const code = prompt('Access code:');
+    if (!code) throw new Error('Access code required.');
+    try { sessionStorage.setItem('code', code); } catch {}
+    opts.headers = { ...(opts.headers || {}), 'X-Access-Code': code };
+    r = await fetch(url, opts);
+  }
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  return r;
+}
+
+async function loadDocs() {
+  const docs = await (await api('/api/documents')).json();
+  $('docs').innerHTML = docs.length
+    ? docs.map(d => `<li><span>${esc(d.name)} <span class="badge">${d.pages} p.</span></span>
+        <button data-name="${esc(d.name)}" title="Remove">✕</button></li>`).join('')
+    : '<li style="opacity:.6">No documents yet.</li>';
+}
+
+$('docs').addEventListener('click', async e => {
+  const name = e.target.dataset.name;
+  if (!name) return;
+  await api('/api/documents/' + encodeURIComponent(name), { method: 'DELETE' });
+  loadDocs();
+});
+
+$('file').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  $('uploadErr').textContent = '';
+  const fd = new FormData();
+  fd.append('file', f);
+  try { await api('/api/documents', { method: 'POST', body: fd }); }
+  catch (err) { $('uploadErr').textContent = err.message; }
+  e.target.value = '';
+  loadDocs();
+});
+
+async function ask() {
+  const q = $('q').value.trim();
+  if (!q) return;
+  $('ask').disabled = true;
+  $('out').innerHTML = '<div class="answer">Thinking…</div>';
+  try {
+    const a = await (await api('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q })
+    })).json();
+    $('out').innerHTML = `<div class="answer">${esc(a.text)}</div>` +
+      a.sources.map(s => `<div class="src"><b>${esc(s.doc)} p.${s.page}</b><br>${esc(s.excerpt)}</div>`).join('');
+  } catch (err) {
+    $('out').innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  }
+  $('ask').disabled = false;
+}
+$('ask').addEventListener('click', ask);
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+
+(async () => {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    $('mode').textContent = s.claude ? 'Claude' : 'demo mode';
+  } catch {}
+  try { await loadDocs(); } catch {}
+})();
+</script>
+</body>
+</html>
