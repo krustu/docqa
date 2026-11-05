@@ -121,7 +121,7 @@ $('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
 (async () => {
   try {
     const s = await (await fetch('/api/status')).json();
-    $('mode').textContent = s.claude ? 'Claude' : 'demo mode';
+    $('mode').textContent = s.provider ? s.provider : 'demo mode';
   } catch {}
   try { await loadDocs(); } catch {}
 })();

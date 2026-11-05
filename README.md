@@ -10,10 +10,10 @@ Upload PDF, TXT or Markdown files, ask a question, get an answer with the file n
 
 1. **Ingest** — `pdftotext` extracts text page by page; text is cut into ~900-character chunks.
 2. **Retrieve** — the question is matched against all chunks with BM25 (keyword ranking, written from scratch in `DocumentStore.cs`).
-3. **Generate** — the top 4 chunks go to Claude with the instruction "answer only from these excerpts and cite them".
+3. **Generate** — the top 4 chunks go to the LLM (Gemini or Claude) with the instruction "answer only from these excerpts and cite them".
 4. **Show** — the answer and the source excerpts appear in the page.
 
-Without `ANTHROPIC_API_KEY` the app runs in demo mode and shows the best matching excerpts instead of a generated answer.
+Without an API key (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) the app runs in demo mode and shows the best matching excerpts instead of a generated answer.
 
 ## Run locally
 
@@ -31,7 +31,9 @@ Open the printed URL (usually http://localhost:5000).
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Enables real answers from Claude |
+| `GEMINI_API_KEY` | Enables answers from Google Gemini (free tier, key from aistudio.google.com) |
+| `GEMINI_MODEL` | Gemini model, default `gemini-flash-latest` |
+| `ANTHROPIC_API_KEY` | Enables answers from Claude (used if no Gemini key is set) |
 | `ANTHROPIC_MODEL` | Model name, default `claude-sonnet-5-5` |
 | `ACCESS_CODE` | If set, the API requires this code (protects your API budget on a public URL) |
 | `LOAD_SAMPLES` | Set to `0` to skip loading the files from `samples/` on start |
