@@ -37,7 +37,7 @@ app.UseStaticFiles();
 
 app.MapGet("/api/status", (AnswerService answers) => new
 {
-    claude = answers.HasApiKey,
+    provider = answers.Provider,
     accessCodeRequired = !string.IsNullOrEmpty(accessCode)
 });
 
