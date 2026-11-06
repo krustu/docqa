@@ -85,6 +85,15 @@ app.MapPost("/api/ask", async (AskRequest body, AnswerService answers, Cancellat
     {
         return Results.Problem(ex.Message, statusCode: 502);
     }
+    catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+    {
+        return Results.Problem("The AI model did not answer within 60 seconds. Try again.", statusCode: 504);
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "Ask failed");
+        return Results.Problem("Unexpected error: " + ex.Message, statusCode: 500);
+    }
 });
 
 // Load the files from ./samples on startup so the demo works right away.
