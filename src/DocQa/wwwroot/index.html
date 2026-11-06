@@ -28,10 +28,13 @@
   .src { font-size: .82rem; opacity: .8; border-left: 3px solid var(--accent); padding-left: 10px; margin-top: 10px; }
   .badge { display: inline-block; font-size: .75rem; border: 1px solid var(--border); border-radius: 99px; padding: 1px 8px; margin-left: 6px; }
   .err { color: #dc2626; margin-top: 8px; }
+  .model-row { align-items: center; margin-bottom: 10px; font-size: .9rem; }
+  select { font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: inherit; }
+  select option { color: #000; }
 </style>
 </head>
 <body>
-  <h1>DocQA <span id="mode" class="badge"></span></h1>
+  <h1>DocQA</h1>
   <p class="sub">Upload PDF, TXT or Markdown files, then ask questions. Answers cite the file and page.</p>
 
   <section>
@@ -43,6 +46,10 @@
 
   <section>
     <h2>Ask a question</h2>
+    <div class="row model-row">
+      <label for="model">Model</label>
+      <select id="model"><option value="">demo mode (no API key)</option></select>
+    </div>
     <div class="row">
       <input type="text" id="q" placeholder="e.g. How often must the safety training be repeated?">
       <button class="primary" id="ask">Ask</button>
@@ -60,7 +67,9 @@ function md(text) {
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
     .replace(/(^|[^*])\*([^*\s][^*]*?)\*(?!\*)/g, '$1<i>$2</i>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\$([^$]{1,20})\$/g, '$1');
+    .replace(/\\times/g, '×').replace(/\\cdot/g, '·').replace(/\\approx/g, '≈')
+    .replace(/\^\{?(\d+)\}?/g, '<sup>$1</sup>')
+    .replace(/\$([^$]{1,30})\$/g, '$1');
   let html = '', inList = false;
   for (const line of text.split('\n')) {
     const m = line.match(/^\s*[-*•]\s+(.*)$/);
@@ -132,7 +141,7 @@ async function ask() {
     const a = await (await api('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: q })
+      body: JSON.stringify({ question: q, provider: $('model').value || null })
     })).json();
     $('out').innerHTML = `<div class="answer">${md(a.text)}</div>` +
       a.sources.map(s => `<div class="src"><b>${esc(s.doc)} p.${s.page}</b><br>${esc(s.excerpt)}</div>`).join('');
@@ -142,12 +151,18 @@ async function ask() {
   $('ask').disabled = false;
 }
 $('ask').addEventListener('click', ask);
+$('model').addEventListener('change', e => { try { localStorage.setItem('model', e.target.value); } catch {} });
 $('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
 
 (async () => {
   try {
     const s = await (await fetch('/api/status')).json();
-    $('mode').textContent = s.provider ? s.provider : 'demo mode';
+    if (s.providers.length) {
+      let saved = null;
+      try { saved = localStorage.getItem('model'); } catch {}
+      $('model').innerHTML = s.providers.map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
+      $('model').value = s.providers.some(p => p.id === saved) ? saved : s.defaultProvider;
+    }
   } catch {}
   try { await loadDocs(); } catch {}
 })();

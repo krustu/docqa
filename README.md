@@ -10,17 +10,16 @@ Upload PDF, TXT or Markdown files, ask a question, get an answer with the file n
 
 1. **Ingest** — `pdftotext` extracts text page by page; text is cut into ~900-character chunks.
 2. **Retrieve** — the question is matched against all chunks with BM25 (keyword ranking, written from scratch in `DocumentStore.cs`).
-3. **Generate** — the top 4 chunks go to the LLM (DeepSeek / Groq / Gemini / Claude) with the instruction "answer only from these excerpts and cite them".
+3. **Generate** — the top 4 chunks go to the LLM the user picked (Gemini / Groq / DeepSeek / Claude) with the instruction "answer only from these excerpts and cite them".
 4. **Show** — the answer and the source excerpts appear in the page.
 
-Without an API key (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) the app runs in demo mode and shows the best matching excerpts instead of a generated answer.
 
 ## Run locally
 
 Requirements: .NET 8 SDK and `pdftotext` (`sudo apt install poppler-utils`, or `brew install poppler`).
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...   # optional
+export GEMINI_API_KEY=...   # optional, any key from the table below
 cd src/DocQa
 dotnet run
 ```
@@ -29,24 +28,28 @@ Open the printed URL (usually http://localhost:5000).
 
 ## Configuration
 
+Every model whose key is set shows up in the **Model** dropdown, so several can be active at once.
+
 | Variable | Purpose |
 |---|---|
-| `LLM_API_KEY` | Key for any OpenAI-compatible API (DeepSeek by default, also Groq, OpenRouter, OpenAI). Used first if set |
-| `LLM_BASE_URL` | API base URL, default `https://api.deepseek.com` (Groq: `https://api.groq.com/openai/v1`) |
-| `LLM_MODEL` | Model, default `deepseek-chat` |
-| `GEMINI_API_KEY` | Enables answers from Google Gemini (free tier, key from aistudio.google.com) |
-| `GEMINI_MODEL` | Gemini model, default `gemini-flash-latest` |
-| `ANTHROPIC_API_KEY` | Enables answers from Claude (used if no Gemini key is set) |
-| `ANTHROPIC_MODEL` | Model name, default `claude-sonnet-5-5` |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | Google Gemini (free tier, key from aistudio.google.com). Default model `gemini-flash-latest` |
+| `GROQ_API_KEY` / `GROQ_MODEL` | Groq (free tier, console.groq.com). Default model `openai/gpt-oss-120b` |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | DeepSeek. Default model `deepseek-chat` |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | Claude. Default model `claude-sonnet-5-5` |
+| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` / `LLM_NAME` | Any other OpenAI-compatible API (OpenRouter, OpenAI, Mistral...) |
+| `DEFAULT_PROVIDER` | Which one is selected first: `gemini`, `groq`, `deepseek`, `claude` or `custom` |
 | `ACCESS_CODE` | If set, the API requires this code (protects your API budget on a public URL) |
 | `LOAD_SAMPLES` | Set to `0` to skip loading the files from `samples/` on start |
 | `PORT` | Port to listen on (set automatically by Railway) |
+
+Without any key the app runs in demo mode and shows the best matching excerpts.
+Overloaded providers (HTTP 429/503) are retried automatically up to 3 times.
 
 ## Deploy
 
 **Railway:** New Project → Deploy from GitHub repo (it detects the `Dockerfile`) → add the variables above → Settings → Networking → Generate Domain.
 
-**Own VPS (e.g. mikr.us):** `docker build -t docqa .` then `docker run -d -p 8080:8080 -e ANTHROPIC_API_KEY=... docqa`.
+**Own VPS (e.g. mikr.us):** `docker build -t docqa .` then `docker run -d -p 8080:8080 -e GEMINI_API_KEY=... docqa`.
 
 ## Limits and next steps
 

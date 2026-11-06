@@ -5,12 +5,15 @@ using System.Text.Json;
 namespace DocQa.Services;
 
 public sealed record Source(string Doc, int Page, string Excerpt);
-public sealed record Answer(string Text, List<Source> Sources, bool Mock);
+public sealed record Answer(string Text, List<Source> Sources, bool Mock, string? Provider);
+public sealed record ProviderInfo(string Id, string Label);
 
 /// <summary>
 /// Retrieval-augmented answering: find the best chunks (BM25), then ask an LLM
-/// to answer using only those chunks. Works with Gemini (free tier) or Claude,
-/// whichever key is set. Without any key it returns the best excerpts.
+/// to answer using only those chunks.
+///
+/// Every provider whose API key is set is available at the same time, and the
+/// user picks one in the UI. Without any key the app returns the best excerpts.
 /// </summary>
 public sealed class AnswerService
 {
@@ -18,56 +21,70 @@ public sealed class AnswerService
         "You answer questions about the user's documents. Use ONLY the numbered excerpts provided. " +
         "Cite the source after each claim like [file.pdf p.3]. " +
         "If the excerpts do not contain the answer, say you could not find it in the documents. " +
-        "Reply in the same language as the question. Be concise.";
+        "Reply in the same language as the question. Be concise. " +
+        "Write plain text with simple markdown (bold, bullet lists); never use LaTeX.";
+
+    private enum Kind { OpenAiCompatible, Gemini, Claude }
+
+    private sealed record Provider(string Id, string Label, Kind Kind, string Key, string Model, string? BaseUrl = null);
 
     private readonly DocumentStore _store;
     private readonly HttpClient _http;
-    private readonly string? _geminiKey;
-    private readonly string _geminiModel;
-    private readonly string? _claudeKey;
-    private readonly string _claudeModel;
-    private readonly string? _openAiKey;
-    private readonly string _openAiBaseUrl;
-    private readonly string _openAiModel;
+    private readonly List<Provider> _providers = new();
+    private readonly string? _defaultId;
 
     public AnswerService(DocumentStore store, HttpClient http, IConfiguration config)
     {
         _store = store;
         _http = http;
-        _geminiKey = config["GEMINI_API_KEY"];
-        _geminiModel = config["GEMINI_MODEL"] ?? "gemini-flash-latest";
-        _claudeKey = config["ANTHROPIC_API_KEY"];
-        _claudeModel = config["ANTHROPIC_MODEL"] ?? "claude-sonnet-5-5";
-        // Any OpenAI-compatible API: DeepSeek (default), Groq, OpenRouter, OpenAI...
-        _openAiKey = config["LLM_API_KEY"];
-        _openAiBaseUrl = (config["LLM_BASE_URL"] ?? "https://api.deepseek.com").TrimEnd('/');
-        _openAiModel = config["LLM_MODEL"] ?? "deepseek-chat";
+
+        void Add(string id, string label, Kind kind, string? key, string model, string? baseUrl = null)
+        {
+            if (!string.IsNullOrWhiteSpace(key))
+                _providers.Add(new Provider(id, $"{label} ({model})", kind, key, model, baseUrl));
+        }
+
+        // Each provider is switched on just by setting its key (model is optional).
+        Add("gemini", "Gemini", Kind.Gemini,
+            config["GEMINI_API_KEY"], config["GEMINI_MODEL"] ?? "gemini-flash-latest");
+        Add("groq", "Groq", Kind.OpenAiCompatible,
+            config["GROQ_API_KEY"], config["GROQ_MODEL"] ?? "openai/gpt-oss-120b", "https://api.groq.com/openai/v1");
+        Add("deepseek", "DeepSeek", Kind.OpenAiCompatible,
+            config["DEEPSEEK_API_KEY"], config["DEEPSEEK_MODEL"] ?? "deepseek-chat", "https://api.deepseek.com/v1");
+        Add("claude", "Claude", Kind.Claude,
+            config["ANTHROPIC_API_KEY"], config["ANTHROPIC_MODEL"] ?? "claude-sonnet-5-5");
+        // Any other OpenAI-compatible API (OpenRouter, OpenAI, Mistral...).
+        Add("custom", config["LLM_NAME"] ?? "Custom", Kind.OpenAiCompatible,
+            config["LLM_API_KEY"], config["LLM_MODEL"] ?? "deepseek-chat",
+            (config["LLM_BASE_URL"] ?? "https://api.deepseek.com/v1").TrimEnd('/'));
+
+        var wanted = config["DEFAULT_PROVIDER"];
+        _defaultId = _providers.FirstOrDefault(p => p.Id == wanted)?.Id ?? _providers.FirstOrDefault()?.Id;
     }
 
-    /// <summary>"openai-compatible", "gemini", "claude" or null (demo mode).</summary>
-    public string? Provider =>
-        !string.IsNullOrWhiteSpace(_openAiKey) ? _openAiModel :
-        !string.IsNullOrWhiteSpace(_geminiKey) ? "gemini" :
-        !string.IsNullOrWhiteSpace(_claudeKey) ? "claude" : null;
+    public IReadOnlyList<ProviderInfo> Providers => _providers.Select(p => new ProviderInfo(p.Id, p.Label)).ToList();
+    public string? DefaultProvider => _defaultId;
+    public bool HasApiKey => _providers.Count > 0;
 
-    public bool HasApiKey => Provider is not null;
-
-    public async Task<Answer> AskAsync(string question, CancellationToken ct)
+    public async Task<Answer> AskAsync(string question, string? providerId, CancellationToken ct)
     {
         var hits = _store.Search(question, top: 4);
         var sources = hits
             .Select(h => new Source(h.Chunk.DocName, h.Chunk.Page, Shorten(h.Chunk.Text, 300)))
             .ToList();
 
-        if (hits.Count == 0)
-            return new Answer("No relevant text found in the uploaded documents.", sources, !HasApiKey);
+        var provider = _providers.FirstOrDefault(p => p.Id == (providerId ?? _defaultId))
+                       ?? _providers.FirstOrDefault();
 
-        if (!HasApiKey)
+        if (hits.Count == 0)
+            return new Answer("No relevant text found in the uploaded documents.", sources, provider is null, provider?.Id);
+
+        if (provider is null)
         {
             var sb = new StringBuilder("(Demo mode: no API key set, showing the best matching excerpts.)\n\n");
             foreach (var h in hits)
                 sb.AppendLine($"[{h.Chunk.DocName} p.{h.Chunk.Page}] {Shorten(h.Chunk.Text, 500)}\n");
-            return new Answer(sb.ToString().Trim(), sources, true);
+            return new Answer(sb.ToString().Trim(), sources, true, null);
         }
 
         var context = new StringBuilder();
@@ -75,18 +92,20 @@ public sealed class AnswerService
             context.AppendLine($"Excerpt {i + 1} [{hits[i].Chunk.DocName} p.{hits[i].Chunk.Page}]:\n{hits[i].Chunk.Text}\n");
         var prompt = $"{context}\nQuestion: {question}";
 
-        var text =
-            !string.IsNullOrWhiteSpace(_openAiKey) ? await AskOpenAiCompatibleAsync(prompt, ct) :
-            Provider == "gemini" ? await AskGeminiAsync(prompt, ct) :
-            await AskClaudeAsync(prompt, ct);
-        return new Answer(text, sources, false);
+        var text = provider.Kind switch
+        {
+            Kind.Gemini => await AskGeminiAsync(provider, prompt, ct),
+            Kind.Claude => await AskClaudeAsync(provider, prompt, ct),
+            _ => await AskOpenAiCompatibleAsync(provider, prompt, ct)
+        };
+        return new Answer(text, sources, false, provider.Id);
     }
 
-    private async Task<string> AskOpenAiCompatibleAsync(string prompt, CancellationToken ct)
+    private async Task<string> AskOpenAiCompatibleAsync(Provider p, string prompt, CancellationToken ct)
     {
         var body = new
         {
-            model = _openAiModel,
+            model = p.Model,
             max_tokens = 1500,
             messages = new[]
             {
@@ -95,24 +114,20 @@ public sealed class AnswerService
             }
         };
 
-        var url = _openAiBaseUrl.EndsWith("/v1") || _openAiBaseUrl.Contains("/openai")
-            ? $"{_openAiBaseUrl}/chat/completions"
-            : $"{_openAiBaseUrl}/v1/chat/completions";
-
         using var doc = await SendAsync(() =>
         {
-            var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
-            req.Headers.Add("Authorization", $"Bearer {_openAiKey}");
+            var req = new HttpRequestMessage(HttpMethod.Post, $"{p.BaseUrl}/chat/completions") { Content = JsonContent.Create(body) };
+            req.Headers.Add("Authorization", $"Bearer {p.Key}");
             return req;
-        }, "LLM", ct);
+        }, p.Label, ct);
 
         var text = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
         if (string.IsNullOrWhiteSpace(text))
-            throw new InvalidOperationException("The model returned an empty answer.");
+            throw new InvalidOperationException($"{p.Label} returned an empty answer.");
         return text;
     }
 
-    private async Task<string> AskGeminiAsync(string prompt, CancellationToken ct)
+    private async Task<string> AskGeminiAsync(Provider p, string prompt, CancellationToken ct)
     {
         var body = new
         {
@@ -121,13 +136,13 @@ public sealed class AnswerService
             generationConfig = new { maxOutputTokens = 4096 }
         };
 
-        var url = $"https://generativelanguage.googleapis.com/v1beta/models/{_geminiModel}:generateContent";
+        var url = $"https://generativelanguage.googleapis.com/v1beta/models/{p.Model}:generateContent";
         using var doc = await SendAsync(() =>
         {
             var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
-            req.Headers.Add("x-goog-api-key", _geminiKey);
+            req.Headers.Add("x-goog-api-key", p.Key);
             return req;
-        }, "Gemini", ct);
+        }, p.Label, ct);
 
         // Thinking models can return a candidate without text (e.g. token limit hit
         // while "thinking", or blocked by safety), so read the response defensively.
@@ -138,8 +153,8 @@ public sealed class AnswerService
         var text = "";
         if (candidate.TryGetProperty("content", out var content) && content.TryGetProperty("parts", out var parts))
             text = string.Concat(parts.EnumerateArray()
-                .Where(p => !(p.TryGetProperty("thought", out var th) && th.ValueKind == JsonValueKind.True))
-                .Select(p => p.TryGetProperty("text", out var t) ? t.GetString() : ""));
+                .Where(x => !(x.TryGetProperty("thought", out var th) && th.ValueKind == JsonValueKind.True))
+                .Select(x => x.TryGetProperty("text", out var t) ? t.GetString() : ""));
 
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -149,12 +164,12 @@ public sealed class AnswerService
         return text;
     }
 
-    private async Task<string> AskClaudeAsync(string prompt, CancellationToken ct)
+    private async Task<string> AskClaudeAsync(Provider p, string prompt, CancellationToken ct)
     {
         var body = new
         {
-            model = _claudeModel,
-            max_tokens = 800,
+            model = p.Model,
+            max_tokens = 1500,
             system = SystemPrompt,
             messages = new[] { new { role = "user", content = prompt } }
         };
@@ -165,10 +180,11 @@ public sealed class AnswerService
             {
                 Content = JsonContent.Create(body)
             };
-            req.Headers.Add("x-api-key", _claudeKey);
+            req.Headers.Add("x-api-key", p.Key);
             req.Headers.Add("anthropic-version", "2023-06-01");
             return req;
-        }, "Claude", ct);
+        }, p.Label, ct);
+
         return doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
     }
 
@@ -195,7 +211,7 @@ public sealed class AnswerService
                 continue;
             }
 
-            var hint = overloaded ? " The model is overloaded right now, try again in a minute." : "";
+            var hint = overloaded ? " The model is overloaded right now, try again in a minute or pick another model." : "";
             throw new InvalidOperationException($"{name} API error {code}.{hint} {Shorten(json, 250)}");
         }
     }

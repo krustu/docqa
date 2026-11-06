@@ -1,0 +1,202 @@
+From 46090ce7abee591b0849dbd618f61cefd049d972 Mon Sep 17 00:00:00 2001
+From: Rysbek Dokturbaev <krustutysbek@gmail.com>
+Date: Fri, 6 Nov 2026 00:12:47 +0100
+Subject: [PATCH] Add Gemini support (free tier) next to Claude
+
+GEMINI_API_KEY is used first, ANTHROPIC_API_KEY as fallback,
+demo mode when neither is set.
+---
+ README.md                           |  8 +--
+ src/DocQa/Program.cs                |  2 +-
+ src/DocQa/Services/AnswerService.cs | 76 +++++++++++++++++++++--------
+ src/DocQa/wwwroot/index.html        |  2 +-
+ 4 files changed, 63 insertions(+), 25 deletions(-)
+
+diff --git a/README.md b/README.md
+index 606d985..93d78f6 100644
+--- a/README.md
++++ b/README.md
+@@ -10,10 +10,10 @@ Upload PDF, TXT or Markdown files, ask a question, get an answer with the file n
+ 
+ 1. **Ingest** — `pdftotext` extracts text page by page; text is cut into ~900-character chunks.
+ 2. **Retrieve** — the question is matched against all chunks with BM25 (keyword ranking, written from scratch in `DocumentStore.cs`).
+-3. **Generate** — the top 4 chunks go to Claude with the instruction "answer only from these excerpts and cite them".
++3. **Generate** — the top 4 chunks go to the LLM (Gemini or Claude) with the instruction "answer only from these excerpts and cite them".
+ 4. **Show** — the answer and the source excerpts appear in the page.
+ 
+-Without `ANTHROPIC_API_KEY` the app runs in demo mode and shows the best matching excerpts instead of a generated answer.
++Without an API key (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) the app runs in demo mode and shows the best matching excerpts instead of a generated answer.
+ 
+ ## Run locally
+ 
+@@ -31,7 +31,9 @@ Open the printed URL (usually http://localhost:5000).
+ 
+ | Variable | Purpose |
+ |---|---|
+-| `ANTHROPIC_API_KEY` | Enables real answers from Claude |
++| `GEMINI_API_KEY` | Enables answers from Google Gemini (free tier, key from aistudio.google.com) |
++| `GEMINI_MODEL` | Gemini model, default `gemini-flash-latest` |
++| `ANTHROPIC_API_KEY` | Enables answers from Claude (used if no Gemini key is set) |
+ | `ANTHROPIC_MODEL` | Model name, default `claude-sonnet-5-5` |
+ | `ACCESS_CODE` | If set, the API requires this code (protects your API budget on a public URL) |
+ | `LOAD_SAMPLES` | Set to `0` to skip loading the files from `samples/` on start |
+diff --git a/src/DocQa/Program.cs b/src/DocQa/Program.cs
+index c15ea0c..bcb6e67 100644
+--- a/src/DocQa/Program.cs
++++ b/src/DocQa/Program.cs
+@@ -37,7 +37,7 @@ app.UseStaticFiles();
+ 
+ app.MapGet("/api/status", (AnswerService answers) => new
+ {
+-    claude = answers.HasApiKey,
++    provider = answers.Provider,
+     accessCodeRequired = !string.IsNullOrEmpty(accessCode)
+ });
+ 
+diff --git a/src/DocQa/Services/AnswerService.cs b/src/DocQa/Services/AnswerService.cs
+index a4f36c7..d9b04a6 100644
+--- a/src/DocQa/Services/AnswerService.cs
++++ b/src/DocQa/Services/AnswerService.cs
+@@ -8,9 +8,9 @@ public sealed record Source(string Doc, int Page, string Excerpt);
+ public sealed record Answer(string Text, List<Source> Sources, bool Mock);
+ 
+ /// <summary>
+-/// Retrieval-augmented answering: find the best chunks (BM25), then ask Claude
+-/// to answer using only those chunks. Without an API key it falls back to
+-/// returning the best excerpts so the app is still demoable.
++/// Retrieval-augmented answering: find the best chunks (BM25), then ask an LLM
++/// to answer using only those chunks. Works with Gemini (free tier) or Claude,
++/// whichever key is set. Without any key it returns the best excerpts.
+ /// </summary>
+ public sealed class AnswerService
+ {
+@@ -22,18 +22,27 @@ public sealed class AnswerService
+ 
+     private readonly DocumentStore _store;
+     private readonly HttpClient _http;
+-    private readonly string? _apiKey;
+-    private readonly string _model;
++    private readonly string? _geminiKey;
++    private readonly string _geminiModel;
++    private readonly string? _claudeKey;
++    private readonly string _claudeModel;
+ 
+     public AnswerService(DocumentStore store, HttpClient http, IConfiguration config)
+     {
+         _store = store;
+         _http = http;
+-        _apiKey = config["ANTHROPIC_API_KEY"];
+-        _model = config["ANTHROPIC_MODEL"] ?? "claude-sonnet-5-5";
++        _geminiKey = config["GEMINI_API_KEY"];
++        _geminiModel = config["GEMINI_MODEL"] ?? "gemini-flash-latest";
++        _claudeKey = config["ANTHROPIC_API_KEY"];
++        _claudeModel = config["ANTHROPIC_MODEL"] ?? "claude-sonnet-5-5";
+     }
+ 
+-    public bool HasApiKey => !string.IsNullOrWhiteSpace(_apiKey);
++    /// <summary>"gemini", "claude" or null (demo mode).</summary>
++    public string? Provider =>
++        !string.IsNullOrWhiteSpace(_geminiKey) ? "gemini" :
++        !string.IsNullOrWhiteSpace(_claudeKey) ? "claude" : null;
++
++    public bool HasApiKey => Provider is not null;
+ 
+     public async Task<Answer> AskAsync(string question, CancellationToken ct)
+     {
+@@ -47,7 +56,7 @@ public sealed class AnswerService
+ 
+         if (!HasApiKey)
+         {
+-            var sb = new StringBuilder("(Demo mode: no ANTHROPIC_API_KEY set, showing the best matching excerpts.)\n\n");
++            var sb = new StringBuilder("(Demo mode: no API key set, showing the best matching excerpts.)\n\n");
+             foreach (var h in hits)
+                 sb.AppendLine($"[{h.Chunk.DocName} p.{h.Chunk.Page}] {Shorten(h.Chunk.Text, 500)}\n");
+             return new Answer(sb.ToString().Trim(), sources, true);
+@@ -56,33 +65,60 @@ public sealed class AnswerService
+         var context = new StringBuilder();
+         for (var i = 0; i < hits.Count; i++)
+             context.AppendLine($"Excerpt {i + 1} [{hits[i].Chunk.DocName} p.{hits[i].Chunk.Page}]:\n{hits[i].Chunk.Text}\n");
++        var prompt = $"{context}\nQuestion: {question}";
++
++        var text = Provider == "gemini"
++            ? await AskGeminiAsync(prompt, ct)
++            : await AskClaudeAsync(prompt, ct);
++        return new Answer(text, sources, false);
++    }
++
++    private async Task<string> AskGeminiAsync(string prompt, CancellationToken ct)
++    {
++        var body = new
++        {
++            system_instruction = new { parts = new[] { new { text = SystemPrompt } } },
++            contents = new[] { new { role = "user", parts = new[] { new { text = prompt } } } },
++            generationConfig = new { maxOutputTokens = 800 }
++        };
+ 
++        var url = $"https://generativelanguage.googleapis.com/v1beta/models/{_geminiModel}:generateContent";
++        using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
++        req.Headers.Add("x-goog-api-key", _geminiKey);
++
++        using var doc = await SendAsync(req, "Gemini", ct);
++        var parts = doc.RootElement.GetProperty("candidates")[0].GetProperty("content").GetProperty("parts");
++        return string.Concat(parts.EnumerateArray().Select(p => p.TryGetProperty("text", out var t) ? t.GetString() : ""));
++    }
++
++    private async Task<string> AskClaudeAsync(string prompt, CancellationToken ct)
++    {
+         var body = new
+         {
+-            model = _model,
++            model = _claudeModel,
+             max_tokens = 800,
+             system = SystemPrompt,
+-            messages = new[]
+-            {
+-                new { role = "user", content = $"{context}\nQuestion: {question}" }
+-            }
++            messages = new[] { new { role = "user", content = prompt } }
+         };
+ 
+         using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages")
+         {
+             Content = JsonContent.Create(body)
+         };
+-        req.Headers.Add("x-api-key", _apiKey);
++        req.Headers.Add("x-api-key", _claudeKey);
+         req.Headers.Add("anthropic-version", "2023-06-01");
+ 
++        using var doc = await SendAsync(req, "Claude", ct);
++        return doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
++    }
++
++    private async Task<JsonDocument> SendAsync(HttpRequestMessage req, string name, CancellationToken ct)
++    {
+         using var resp = await _http.SendAsync(req, ct);
+         var json = await resp.Content.ReadAsStringAsync(ct);
+         if (!resp.IsSuccessStatusCode)
+-            throw new InvalidOperationException($"Claude API error {(int)resp.StatusCode}: {Shorten(json, 300)}");
+-
+-        using var doc = JsonDocument.Parse(json);
+-        var text = doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
+-        return new Answer(text, sources, false);
++            throw new InvalidOperationException($"{name} API error {(int)resp.StatusCode}: {Shorten(json, 300)}");
++        return JsonDocument.Parse(json);
+     }
+ 
+     private static string Shorten(string s, int max) =>
+diff --git a/src/DocQa/wwwroot/index.html b/src/DocQa/wwwroot/index.html
+index 5ee09db..c46d526 100644
+--- a/src/DocQa/wwwroot/index.html
++++ b/src/DocQa/wwwroot/index.html
+@@ -121,7 +121,7 @@ $('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+ (async () => {
+   try {
+     const s = await (await fetch('/api/status')).json();
+-    $('mode').textContent = s.claude ? 'Claude' : 'demo mode';
++    $('mode').textContent = s.provider ? s.provider : 'demo mode';
+   } catch {}
+   try { await loadDocs(); } catch {}
+ })();
+-- 
+2.43.0
+
