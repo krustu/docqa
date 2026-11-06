@@ -20,7 +20,11 @@
   button:disabled { opacity: .5; cursor: default; }
   .row { display: flex; gap: 8px; }
   input[type=text] { flex: 1; font: inherit; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: inherit; }
-  .answer { white-space: pre-wrap; margin-top: 14px; }
+  .answer { margin-top: 14px; }
+  .answer p { margin: 0 0 8px; }
+  .answer ul.md { list-style: disc; padding-left: 22px; margin: 0 0 8px; }
+  .answer ul.md li { display: list-item; padding: 2px 0; font-size: 1rem; }
+  .answer code { font-size: .9em; background: #8882; padding: 1px 4px; border-radius: 4px; }
   .src { font-size: .82rem; opacity: .8; border-left: 3px solid var(--accent); padding-left: 10px; margin-top: 10px; }
   .badge { display: inline-block; font-size: .75rem; border: 1px solid var(--border); border-radius: 99px; padding: 1px 8px; margin-left: 6px; }
   .err { color: #dc2626; margin-top: 8px; }
@@ -49,6 +53,23 @@
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// Minimal, safe markdown: text is escaped first, then **bold**, *italic*, `code`, bullet lists.
+function md(text) {
+  const inline = t => esc(t)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[^*])\*([^*\s][^*]*?)\*(?!\*)/g, '$1<i>$2</i>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\$([^$]{1,20})\$/g, '$1');
+  let html = '', inList = false;
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s*[-*•]\s+(.*)$/);
+    if (m) { if (!inList) { html += '<ul class="md">'; inList = true; } html += `<li>${inline(m[1])}</li>`; continue; }
+    if (inList) { html += '</ul>'; inList = false; }
+    html += line.trim() ? `<p>${inline(line)}</p>` : '';
+  }
+  return html + (inList ? '</ul>' : '');
+}
 
 function headers() {
   let code = null;
@@ -113,7 +134,7 @@ async function ask() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: q })
     })).json();
-    $('out').innerHTML = `<div class="answer">${esc(a.text)}</div>` +
+    $('out').innerHTML = `<div class="answer">${md(a.text)}</div>` +
       a.sources.map(s => `<div class="src"><b>${esc(s.doc)} p.${s.page}</b><br>${esc(s.excerpt)}</div>`).join('');
   } catch (err) {
     $('out').innerHTML = `<div class="err">${esc(err.message)}</div>`;
