@@ -10,7 +10,7 @@ Upload PDF, TXT or Markdown files, ask a question, get an answer with the file n
 
 1. **Ingest** — `pdftotext` extracts text page by page; text is cut into ~900-character chunks.
 2. **Retrieve** — the question is matched against all chunks with BM25 (keyword ranking, written from scratch in `DocumentStore.cs`).
-3. **Generate** — the top 4 chunks go to the LLM (Gemini or Claude) with the instruction "answer only from these excerpts and cite them".
+3. **Generate** — the top 4 chunks go to the LLM (DeepSeek / Groq / Gemini / Claude) with the instruction "answer only from these excerpts and cite them".
 4. **Show** — the answer and the source excerpts appear in the page.
 
 Without an API key (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) the app runs in demo mode and shows the best matching excerpts instead of a generated answer.
@@ -31,6 +31,9 @@ Open the printed URL (usually http://localhost:5000).
 
 | Variable | Purpose |
 |---|---|
+| `LLM_API_KEY` | Key for any OpenAI-compatible API (DeepSeek by default, also Groq, OpenRouter, OpenAI). Used first if set |
+| `LLM_BASE_URL` | API base URL, default `https://api.deepseek.com` (Groq: `https://api.groq.com/openai/v1`) |
+| `LLM_MODEL` | Model, default `deepseek-chat` |
 | `GEMINI_API_KEY` | Enables answers from Google Gemini (free tier, key from aistudio.google.com) |
 | `GEMINI_MODEL` | Gemini model, default `gemini-flash-latest` |
 | `ANTHROPIC_API_KEY` | Enables answers from Claude (used if no Gemini key is set) |

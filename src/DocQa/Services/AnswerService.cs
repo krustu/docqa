@@ -26,6 +26,9 @@ public sealed class AnswerService
     private readonly string _geminiModel;
     private readonly string? _claudeKey;
     private readonly string _claudeModel;
+    private readonly string? _openAiKey;
+    private readonly string _openAiBaseUrl;
+    private readonly string _openAiModel;
 
     public AnswerService(DocumentStore store, HttpClient http, IConfiguration config)
     {
@@ -35,10 +38,15 @@ public sealed class AnswerService
         _geminiModel = config["GEMINI_MODEL"] ?? "gemini-flash-latest";
         _claudeKey = config["ANTHROPIC_API_KEY"];
         _claudeModel = config["ANTHROPIC_MODEL"] ?? "claude-sonnet-5-5";
+        // Any OpenAI-compatible API: DeepSeek (default), Groq, OpenRouter, OpenAI...
+        _openAiKey = config["LLM_API_KEY"];
+        _openAiBaseUrl = (config["LLM_BASE_URL"] ?? "https://api.deepseek.com").TrimEnd('/');
+        _openAiModel = config["LLM_MODEL"] ?? "deepseek-chat";
     }
 
-    /// <summary>"gemini", "claude" or null (demo mode).</summary>
+    /// <summary>"openai-compatible", "gemini", "claude" or null (demo mode).</summary>
     public string? Provider =>
+        !string.IsNullOrWhiteSpace(_openAiKey) ? _openAiModel :
         !string.IsNullOrWhiteSpace(_geminiKey) ? "gemini" :
         !string.IsNullOrWhiteSpace(_claudeKey) ? "claude" : null;
 
@@ -67,10 +75,41 @@ public sealed class AnswerService
             context.AppendLine($"Excerpt {i + 1} [{hits[i].Chunk.DocName} p.{hits[i].Chunk.Page}]:\n{hits[i].Chunk.Text}\n");
         var prompt = $"{context}\nQuestion: {question}";
 
-        var text = Provider == "gemini"
-            ? await AskGeminiAsync(prompt, ct)
-            : await AskClaudeAsync(prompt, ct);
+        var text =
+            !string.IsNullOrWhiteSpace(_openAiKey) ? await AskOpenAiCompatibleAsync(prompt, ct) :
+            Provider == "gemini" ? await AskGeminiAsync(prompt, ct) :
+            await AskClaudeAsync(prompt, ct);
         return new Answer(text, sources, false);
+    }
+
+    private async Task<string> AskOpenAiCompatibleAsync(string prompt, CancellationToken ct)
+    {
+        var body = new
+        {
+            model = _openAiModel,
+            max_tokens = 1500,
+            messages = new[]
+            {
+                new { role = "system", content = SystemPrompt },
+                new { role = "user", content = prompt }
+            }
+        };
+
+        var url = _openAiBaseUrl.EndsWith("/v1") || _openAiBaseUrl.Contains("/openai")
+            ? $"{_openAiBaseUrl}/chat/completions"
+            : $"{_openAiBaseUrl}/v1/chat/completions";
+
+        using var doc = await SendAsync(() =>
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
+            req.Headers.Add("Authorization", $"Bearer {_openAiKey}");
+            return req;
+        }, "LLM", ct);
+
+        var text = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+        if (string.IsNullOrWhiteSpace(text))
+            throw new InvalidOperationException("The model returned an empty answer.");
+        return text;
     }
 
     private async Task<string> AskGeminiAsync(string prompt, CancellationToken ct)
@@ -83,10 +122,12 @@ public sealed class AnswerService
         };
 
         var url = $"https://generativelanguage.googleapis.com/v1beta/models/{_geminiModel}:generateContent";
-        using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
-        req.Headers.Add("x-goog-api-key", _geminiKey);
-
-        using var doc = await SendAsync(req, "Gemini", ct);
+        using var doc = await SendAsync(() =>
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
+            req.Headers.Add("x-goog-api-key", _geminiKey);
+            return req;
+        }, "Gemini", ct);
 
         // Thinking models can return a candidate without text (e.g. token limit hit
         // while "thinking", or blocked by safety), so read the response defensively.
@@ -118,24 +159,45 @@ public sealed class AnswerService
             messages = new[] { new { role = "user", content = prompt } }
         };
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages")
+        using var doc = await SendAsync(() =>
         {
-            Content = JsonContent.Create(body)
-        };
-        req.Headers.Add("x-api-key", _claudeKey);
-        req.Headers.Add("anthropic-version", "2023-06-01");
-
-        using var doc = await SendAsync(req, "Claude", ct);
+            var req = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages")
+            {
+                Content = JsonContent.Create(body)
+            };
+            req.Headers.Add("x-api-key", _claudeKey);
+            req.Headers.Add("anthropic-version", "2023-06-01");
+            return req;
+        }, "Claude", ct);
         return doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
     }
 
-    private async Task<JsonDocument> SendAsync(HttpRequestMessage req, string name, CancellationToken ct)
+    /// <summary>
+    /// Sends the request, retrying up to 3 times when the provider is overloaded
+    /// (429 / 503 / 529). Free tiers hit this often.
+    /// </summary>
+    private async Task<JsonDocument> SendAsync(Func<HttpRequestMessage> makeRequest, string name, CancellationToken ct)
     {
-        using var resp = await _http.SendAsync(req, ct);
-        var json = await resp.Content.ReadAsStringAsync(ct);
-        if (!resp.IsSuccessStatusCode)
-            throw new InvalidOperationException($"{name} API error {(int)resp.StatusCode}: {Shorten(json, 300)}");
-        return JsonDocument.Parse(json);
+        const int attempts = 3;
+        for (var attempt = 1; ; attempt++)
+        {
+            using var req = makeRequest();
+            using var resp = await _http.SendAsync(req, ct);
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            if (resp.IsSuccessStatusCode)
+                return JsonDocument.Parse(json);
+
+            var code = (int)resp.StatusCode;
+            var overloaded = code is 429 or 503 or 529;
+            if (overloaded && attempt < attempts)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2 * attempt), ct);
+                continue;
+            }
+
+            var hint = overloaded ? " The model is overloaded right now, try again in a minute." : "";
+            throw new InvalidOperationException($"{name} API error {code}.{hint} {Shorten(json, 250)}");
+        }
     }
 
     private static string Shorten(string s, int max) =>
