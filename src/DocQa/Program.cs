@@ -37,7 +37,8 @@ app.UseStaticFiles();
 
 app.MapGet("/api/status", (AnswerService answers) => new
 {
-    provider = answers.Provider,
+    providers = answers.Providers,
+    defaultProvider = answers.DefaultProvider,
     accessCodeRequired = !string.IsNullOrEmpty(accessCode)
 });
 
@@ -79,7 +80,7 @@ app.MapPost("/api/ask", async (AskRequest body, AnswerService answers, Cancellat
         return Results.BadRequest("Question is empty.");
     try
     {
-        return Results.Ok(await answers.AskAsync(body.Question.Trim(), ct));
+        return Results.Ok(await answers.AskAsync(body.Question.Trim(), body.Provider, ct));
     }
     catch (InvalidOperationException ex)
     {
@@ -122,4 +123,4 @@ if (app.Configuration["LOAD_SAMPLES"] != "0")
 
 app.Run();
 
-public sealed record AskRequest(string Question);
+public sealed record AskRequest(string Question, string? Provider = null);
