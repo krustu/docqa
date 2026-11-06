@@ -79,7 +79,7 @@ public sealed class AnswerService
         {
             system_instruction = new { parts = new[] { new { text = SystemPrompt } } },
             contents = new[] { new { role = "user", parts = new[] { new { text = prompt } } } },
-            generationConfig = new { maxOutputTokens = 800 }
+            generationConfig = new { maxOutputTokens = 4096 }
         };
 
         var url = $"https://generativelanguage.googleapis.com/v1beta/models/{_geminiModel}:generateContent";
@@ -87,8 +87,25 @@ public sealed class AnswerService
         req.Headers.Add("x-goog-api-key", _geminiKey);
 
         using var doc = await SendAsync(req, "Gemini", ct);
-        var parts = doc.RootElement.GetProperty("candidates")[0].GetProperty("content").GetProperty("parts");
-        return string.Concat(parts.EnumerateArray().Select(p => p.TryGetProperty("text", out var t) ? t.GetString() : ""));
+
+        // Thinking models can return a candidate without text (e.g. token limit hit
+        // while "thinking", or blocked by safety), so read the response defensively.
+        if (!doc.RootElement.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0)
+            throw new InvalidOperationException("Gemini returned no answer: " + Shorten(doc.RootElement.ToString(), 300));
+
+        var candidate = candidates[0];
+        var text = "";
+        if (candidate.TryGetProperty("content", out var content) && content.TryGetProperty("parts", out var parts))
+            text = string.Concat(parts.EnumerateArray()
+                .Where(p => !(p.TryGetProperty("thought", out var th) && th.ValueKind == JsonValueKind.True))
+                .Select(p => p.TryGetProperty("text", out var t) ? t.GetString() : ""));
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            var reason = candidate.TryGetProperty("finishReason", out var r) ? r.GetString() : "unknown";
+            throw new InvalidOperationException($"Gemini returned an empty answer (finishReason: {reason}).");
+        }
+        return text;
     }
 
     private async Task<string> AskClaudeAsync(string prompt, CancellationToken ct)

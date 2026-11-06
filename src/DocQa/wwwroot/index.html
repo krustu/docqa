@@ -66,7 +66,12 @@ async function api(url, opts = {}) {
     opts.headers = { ...(opts.headers || {}), 'X-Access-Code': code };
     r = await fetch(url, opts);
   }
-  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  if (!r.ok) {
+    const body = await r.text();
+    let msg = body;
+    try { const j = JSON.parse(body); msg = j.detail || j.title || body; } catch {}
+    throw new Error(msg || `Request failed (HTTP ${r.status})`);
+  }
   return r;
 }
 
